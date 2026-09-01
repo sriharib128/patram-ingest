@@ -1,0 +1,1571 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crash-safe inference over hundreds of millions of images · Patram-Ingest</title>
+<meta name="description" content="How Patram-Ingest runs days-long GPU inference over hundreds of millions of document images, and what bounds every crash to at most 250 replayed images.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --canvas: #f7f2e9;
+    --paper: #fffdf8;
+    --ink: #2b2419;
+    --ink-soft: #6b5e4b;
+    --ink-faint: #8d7f69;
+    --line: #e7ddc9;
+    --line-strong: #d5c6aa;
+    --accent: #b3541e;
+    --accent-deep: #8a3d12;
+    --accent-wash: #faeadb;
+    --green: #35705a;
+    --green-wash: #e7f1e9;
+    --cold: #5c7b99;
+    --cold-wash: #e9eef4;
+    --amber: #a4761c;
+    --amber-wash: #f8efd9;
+    --red: #b0402f;
+    --red-wash: #f9e7e1;
+    --night: #2d2114;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+    --body-font: "IBM Plex Sans", system-ui, sans-serif;
+    --display: "Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+    --shadow-sm: 0 1px 2px rgb(70 50 20 / 5%), 0 6px 20px rgb(70 50 20 / 6%);
+    --shadow-lg: 0 28px 80px rgb(88 62 26 / 13%);
+    --radius-sm: 10px;
+    --radius-md: 18px;
+    --radius-lg: 26px;
+    --content: 1180px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 92px; }
+  body, h1, h2, h3, h4, p, figure, figcaption, blockquote, dl, dd, ul { margin: 0; }
+  img, svg { display: block; max-width: 100%; }
+  button { font: inherit; }
+
+  body {
+    min-width: 320px;
+    color: var(--ink);
+    background:
+      linear-gradient(rgb(213 198 170 / 22%) 1px, transparent 1px) 0 0 / 100% 48px,
+      var(--canvas);
+    font-family: var(--body-font);
+    font-size: 17px;
+    line-height: 1.72;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::before {
+    position: fixed;
+    inset: 0 0 auto;
+    height: 280px;
+    z-index: -1;
+    background: linear-gradient(180deg, #f3e9d7 0%, rgb(247 242 233 / 0%) 100%);
+    content: "";
+    pointer-events: none;
+  }
+  ::selection { color: var(--ink); background: #f2d3ad; }
+
+  a { color: inherit; text-decoration-thickness: 1px; text-underline-offset: 0.2em; }
+  :focus-visible { outline: 3px solid #e0955c; outline-offset: 3px; }
+
+  code {
+    padding: 0.08em 0.35em;
+    border: 1px solid #e4d7bf;
+    border-radius: 5px;
+    color: #8a4517;
+    background: #f8f1e3;
+    font-family: var(--mono);
+    font-size: 0.84em;
+  }
+
+  /* ---------- header ---------- */
+  .read-progress { position: fixed; inset: 0 0 auto; z-index: 50; height: 3px; }
+  .read-progress span {
+    display: block;
+    width: 0;
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), #d1913c);
+  }
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    width: 100%;
+    border-bottom: 1px solid rgb(213 198 170 / 75%);
+    background: rgb(247 242 233 / 90%);
+    backdrop-filter: blur(18px);
+  }
+  .header-inner {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    justify-content: space-between;
+    width: min(100% - 48px, var(--content));
+    min-height: 68px;
+    margin-inline: auto;
+  }
+  .brand {
+    font-family: var(--display);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .header-meta {
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: right;
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.85fr);
+    gap: clamp(56px, 8vw, 110px);
+    align-items: end;
+    width: min(100% - 48px, var(--content));
+    margin-inline: auto;
+    padding: 100px 0 92px;
+  }
+  .eyebrow {
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+  .eyebrow span::after {
+    display: inline-block;
+    width: 18px;
+    height: 1px;
+    margin: 0 10px 3px;
+    background: var(--line-strong);
+    content: "";
+  }
+  .hero h1 {
+    margin-top: 25px;
+    font-family: var(--display);
+    font-size: clamp(42px, 5.6vw, 72px);
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    line-height: 1.02;
+    text-wrap: balance;
+  }
+  .hero h1 span { color: var(--accent); }
+  .hero-deck {
+    max-width: 640px;
+    margin-top: 30px;
+    color: var(--ink-soft);
+    font-size: clamp(18px, 1.9vw, 21px);
+    line-height: 1.58;
+    text-wrap: pretty;
+  }
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 26px;
+    margin-top: 32px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .hero-meta b { color: var(--ink); font-weight: 500; }
+
+  /* hero state ledger */
+  .hero-card { padding: 4px 0 6px 30px; border-left: 2px solid var(--accent); }
+  .card-label {
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .state-table { margin: 15px 0 16px; }
+  .state-row {
+    display: grid;
+    grid-template-columns: 20px 1fr;
+    gap: 12px;
+    align-items: baseline;
+    padding: 8px 0;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .state-row:first-child { border-top: 0; }
+  .state-num { color: var(--ink-faint); font-size: 11px; }
+  .state-row b { font-weight: 500; letter-spacing: 0.01em; }
+  .state-row small { display: block; color: var(--ink-faint); font-family: var(--body-font); font-size: 11.5px; line-height: 1.4; }
+  .st0 b { color: var(--ink-faint); }
+  .st1 b { color: var(--amber); }
+  .st2 b { color: var(--green); }
+  .st3 b { color: var(--red); }
+  .st4 b, .st5 b { color: var(--cold); }
+  .hero-card > p:last-child { color: var(--ink-soft); font-size: 14px; line-height: 1.6; }
+  .hero-card > p:last-child strong { color: var(--accent-deep); }
+
+  /* ---------- article layout ---------- */
+  .article-layout {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 760px);
+    gap: clamp(56px, 8vw, 116px);
+    align-items: start;
+    width: min(100% - 48px, 1070px);
+    margin-inline: auto;
+    padding: 8px 0 56px;
+  }
+  .article-rail { position: sticky; top: 104px; }
+  .article-rail > p {
+    margin-bottom: 18px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .article-rail nav { display: flex; flex-direction: column; gap: 13px; }
+  .article-rail a {
+    color: var(--ink-faint);
+    font-size: 13px;
+    line-height: 1.35;
+    text-decoration: none;
+    transition: color 160ms ease, transform 160ms ease;
+  }
+  .article-rail a:hover,
+  .article-rail a[aria-current="true"] { color: var(--accent); transform: translateX(3px); }
+
+  .article-body > section { padding: 0 0 100px; }
+  .section-index {
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+  .article-body h2 {
+    max-width: 700px;
+    margin: 14px 0 26px;
+    font-family: var(--display);
+    font-size: clamp(30px, 3.7vw, 42px);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+  .article-body section > p { margin-top: 22px; color: #4a4030; text-wrap: pretty; }
+  .article-body section > p strong { color: var(--ink); }
+
+  /* primer */
+  .context-primer {
+    margin: 0 0 88px;
+    padding: 30px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md);
+    background: rgb(255 253 248 / 78%);
+    box-shadow: var(--shadow-sm);
+  }
+  .context-primer h2 {
+    margin: 6px 0 20px;
+    font-family: var(--display);
+    font-size: 23px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .context-primer dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
+  .context-primer dl div {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 12px;
+    padding: 13px 0;
+    border-top: 1px solid var(--line);
+  }
+  .context-primer dt { padding-top: 2px; color: var(--accent); font-family: var(--mono); font-size: 11px; }
+  .context-primer dd { color: var(--ink-soft); font-size: 13.5px; line-height: 1.55; }
+
+  .short-statement {
+    margin: 38px 0 10px;
+    color: var(--accent);
+    font-family: var(--display);
+    font-size: clamp(22px, 2.8vw, 28px);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.3;
+    text-wrap: balance;
+  }
+
+  /* code */
+  .code-block {
+    position: relative;
+    overflow: hidden;
+    margin: 34px 0;
+    border: 1px solid #4a3826;
+    border-radius: var(--radius-md);
+    color: #efe3cd;
+    background: var(--night);
+    box-shadow: var(--shadow-sm);
+  }
+  .code-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 11px 16px;
+    border-bottom: 1px solid #4d3b27;
+    color: #c2a882;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .code-header button {
+    padding: 3px 10px;
+    border: 1px solid #6d543a;
+    border-radius: 5px;
+    color: #e4d2b4;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .code-header button:hover { color: #fff; border-color: #a3835c; }
+  .code-block pre {
+    margin: 0;
+    overflow-x: auto;
+    padding: 24px 26px 28px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.85;
+  }
+  .code-block code { padding: 0; border: 0; color: inherit; background: transparent; font-size: inherit; }
+  .code-block .c { color: #a08d6e; }
+  .code-block .s { color: #e5b878; }
+  .code-block .k { color: #d98e5f; }
+
+  /* figures */
+  .arch-figure {
+    margin: 40px 0 10px;
+    padding: 28px 26px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .arch-figure svg { width: 100%; height: auto; }
+  .arch-figure figcaption {
+    margin-top: 16px;
+    padding-top: 15px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-size: 13.5px;
+    line-height: 1.6;
+  }
+  .arch-figure figcaption strong { color: var(--ink); }
+
+  /* failure taxonomy */
+  .taxonomy-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 36px 0 8px;
+  }
+  .taxonomy-card {
+    padding: 20px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .taxonomy-card h3 {
+    display: flex;
+    gap: 9px;
+    align-items: baseline;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .taxonomy-card h3::before {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    content: "";
+  }
+  .taxonomy-card h3 small {
+    color: var(--ink-faint);
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .taxonomy-card p { margin-top: 9px; color: var(--ink-soft); font-size: 13.5px; line-height: 1.58; }
+  .taxonomy-card p strong { color: var(--ink); }
+  .tx-ok h3 { color: var(--green); }
+  .tx-ok h3::before { background: var(--green); }
+  .tx-fail h3 { color: var(--amber); }
+  .tx-fail h3::before { background: var(--amber); }
+  .tx-reject h3 { color: var(--red); }
+  .tx-reject h3::before { background: var(--red); }
+  .tx-infra h3 { color: var(--cold); }
+  .tx-infra h3::before { background: var(--cold); }
+
+  /* kill-point explorer */
+  .kill-card {
+    overflow: hidden;
+    margin: 40px 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-lg);
+    background: var(--paper);
+    box-shadow: var(--shadow-lg);
+  }
+  .kill-toolbar { padding: 18px 22px 17px; border-bottom: 1px solid var(--line); background: #fbf7ee; }
+  .kill-toolbar > p {
+    margin-bottom: 13px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+  .kill-steps { display: flex; flex-wrap: wrap; gap: 6px; }
+  .kill-steps button {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    color: var(--ink-soft);
+    background: var(--paper);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+  }
+  .kill-steps button:hover { border-color: var(--accent); color: var(--ink); }
+  .kill-steps button i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+  .kill-steps button[aria-pressed="true"] {
+    border-color: var(--accent);
+    color: var(--accent-deep);
+    background: var(--accent-wash);
+  }
+  .kill-steps button[aria-pressed="true"] i { background: var(--accent); }
+  .kill-readout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 32px; padding: 22px 26px 4px; }
+  .kill-field { padding-bottom: 18px; }
+  .kill-field h4 {
+    margin-bottom: 4px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+  .kill-field p { color: var(--ink-soft); font-size: 13.5px; line-height: 1.58; }
+  .kill-verdict {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    padding: 15px 26px 17px;
+    border-top: 1px solid var(--line);
+    background: var(--green-wash);
+  }
+  .kill-verdict b {
+    flex: 0 0 auto;
+    padding: 3px 10px;
+    border-radius: 20px;
+    color: #fff;
+    background: var(--green);
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .kill-verdict p { color: #2b5544; font-size: 13px; line-height: 1.55; }
+
+  /* pool comparison */
+  .pool-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 36px 0 8px; }
+  .pool-panel {
+    padding: 20px 22px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .pool-panel h3 {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    color: var(--ink-soft);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+  .pool-panel h3 .tag {
+    padding: 1px 8px;
+    border-radius: 20px;
+    color: #2d2114;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .tag-before { background: #b6a68c; }
+  .tag-after { background: #e0a04f; }
+  .pool-panel svg { margin-top: 14px; }
+  .pool-panel p { margin-top: 14px; color: var(--ink-soft); font-size: 13px; line-height: 1.58; }
+  .pool-panel p strong { color: var(--ink); }
+
+  /* throughput bars */
+  .bar-chart {
+    margin: 36px 0 8px;
+    padding: 24px 28px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .bar-chart > p:first-child {
+    margin-bottom: 18px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .bar-row { display: grid; grid-template-columns: 128px 1fr 78px; gap: 14px; align-items: center; }
+  .bar-row + .bar-row { margin-top: 9px; }
+  .bar-row > span { color: var(--ink-faint); font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; }
+  .bar-rail { border-radius: 5px; background: #f2ebdd; }
+  .bar-rail i { display: block; height: 22px; border-radius: 5px; }
+  .bar-old i { background: #cbb894; }
+  .bar-new i { background: var(--accent); }
+  .bar-row > b { color: var(--ink); font-family: var(--mono); font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; }
+  .bar-chart > p:last-child { padding-top: 18px; color: var(--ink-soft); font-size: 13.5px; line-height: 1.6; }
+  .bar-chart > p:last-child strong { color: var(--ink); }
+
+  /* production stats */
+  .stat-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin: 36px 0 8px;
+  }
+  .stat-cell {
+    padding: 20px 22px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .stat-cell b {
+    display: block;
+    color: var(--accent);
+    font-family: var(--display);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    line-height: 1;
+  }
+  .stat-cell span { display: block; margin-top: 10px; color: var(--ink-soft); font-size: 12.5px; line-height: 1.5; }
+
+  /* deep dives */
+  .deep-dive {
+    margin-top: 28px;
+    border-top: 1px solid var(--line-strong);
+    border-bottom: 1px solid var(--line-strong);
+    background: rgb(255 253 248 / 55%);
+  }
+  .deep-dive + .deep-dive { margin-top: 12px; }
+  .deep-dive summary {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 17px 6px;
+    color: var(--ink);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .deep-dive summary::marker { color: var(--accent); }
+  .deep-dive summary small {
+    flex: 0 0 auto;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .deep-dive > div { padding: 4px 28px 24px; color: var(--ink-soft); font-size: 14px; line-height: 1.68; }
+  .deep-dive > div p + p { margin-top: 14px; }
+  .deep-dive strong { color: var(--ink); }
+
+  /* fit cards */
+  .fit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 38px 0 8px; }
+  .fit-card {
+    padding: 26px 28px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .fit-card-positive { border-color: #a9cbb4; background: #f4faf3; }
+  .fit-card h3 { margin-bottom: 16px; font-family: var(--display); font-size: 18px; font-weight: 700; letter-spacing: -0.02em; }
+  .fit-card ul { padding: 0; list-style: none; }
+  .fit-card li {
+    position: relative;
+    padding: 9px 0 9px 20px;
+    border-top: 1px solid rgb(213 198 170 / 55%);
+    color: var(--ink-soft);
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .fit-card li::before {
+    position: absolute;
+    top: 16px;
+    left: 2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--line-strong);
+    content: "";
+  }
+  .fit-card-positive li::before { background: var(--green); }
+
+  /* takeaways */
+  .takeaway-list { margin: 34px 0 0; padding: 0; border-top: 1px solid var(--line-strong); list-style: none; counter-reset: tk; }
+  .takeaway-list li {
+    display: grid;
+    grid-template-columns: 52px 1fr;
+    gap: 14px;
+    padding: 19px 4px;
+    border-bottom: 1px solid var(--line);
+    counter-increment: tk;
+  }
+  .takeaway-list li::before {
+    padding-top: 5px;
+    color: var(--accent);
+    content: counter(tk, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .takeaway-list strong { display: block; color: var(--ink); font-size: 15.5px; }
+  .takeaway-list p { margin-top: 4px; color: var(--ink-soft); font-size: 14px; line-height: 1.6; }
+
+  .closing-paragraph {
+    margin-top: 46px;
+    padding-left: 25px;
+    border-left: 3px solid var(--accent);
+    color: var(--ink);
+    font-family: var(--display);
+    font-size: clamp(20px, 2.5vw, 24px);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.45;
+    text-wrap: balance;
+  }
+
+  .article-footer {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 32px;
+    border-top: 1px solid var(--line-strong);
+  }
+  .article-footer p { max-width: 560px; color: var(--ink-faint); font-size: 12.5px; line-height: 1.55; }
+  .article-footer strong { color: var(--ink); }
+
+  /* responsive */
+  @media (max-width: 980px) {
+    .hero { grid-template-columns: 1fr; padding-top: 84px; }
+    .hero-card { max-width: 540px; }
+    .article-layout { grid-template-columns: 1fr; width: min(100% - 48px, 760px); }
+    .article-rail { display: none; }
+  }
+  @media (max-width: 680px) {
+    html { scroll-padding-top: 74px; }
+    body { font-size: 16px; line-height: 1.68; }
+    .header-inner, .hero, .article-layout { width: min(100% - 30px, var(--content)); }
+    .header-inner { min-height: 58px; }
+    .hero { padding: 64px 0 68px; gap: 52px; }
+    .hero h1 { font-size: clamp(36px, 10.5vw, 56px); }
+    .hero-deck { margin-top: 26px; font-size: 17px; }
+    .hero-card { padding-left: 20px; }
+    .article-body > section { padding-bottom: 80px; }
+    .context-primer { margin-bottom: 66px; padding: 24px 20px; }
+    .context-primer dl { grid-template-columns: 1fr; }
+    .taxonomy-grid, .pool-compare, .fit-grid { grid-template-columns: 1fr; }
+    .stat-strip { grid-template-columns: 1fr; }
+    .kill-readout { grid-template-columns: 1fr; padding: 20px 20px 2px; }
+    .kill-toolbar { padding: 16px 18px; }
+    .kill-verdict { align-items: flex-start; flex-direction: column; gap: 9px; padding: 15px 20px; }
+    .bar-chart { padding: 20px 18px 18px; }
+    .bar-row { grid-template-columns: 74px 1fr 70px; gap: 10px; }
+    .deep-dive > div { padding-inline: 4px; }
+    .article-footer { flex-direction: column; align-items: flex-start; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  /* ---- components added for the rebuilt article ---- */
+  .parts-list { margin: 26px 0 8px; padding: 0; border-top: 1px solid var(--line-strong); list-style: none; }
+  .parts-list li {
+    display: grid;
+    grid-template-columns: 158px 1fr;
+    gap: 16px;
+    padding: 13px 4px;
+    border-bottom: 1px solid var(--line);
+  }
+  .parts-list b { color: var(--accent-deep); font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
+  .parts-list span { color: var(--ink-soft); font-size: 14px; line-height: 1.55; }
+  .parts-list span strong { color: var(--ink); }
+
+  .principle {
+    margin: 34px 0 8px;
+    padding: 22px 26px;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--accent-wash);
+  }
+  .principle p { color: #5c4322; font-size: 15px; line-height: 1.62; }
+  .principle p + p { margin-top: 12px; }
+  .principle strong { color: var(--accent-deep); }
+
+  .demand-list { margin: 26px 0 8px; padding: 0; list-style: none; }
+  .demand-list li {
+    position: relative;
+    padding: 12px 0 12px 30px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-size: 14.5px;
+    line-height: 1.6;
+  }
+  .demand-list li::before {
+    position: absolute;
+    top: 12px;
+    left: 2px;
+    color: var(--accent);
+    content: "\2192";
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .demand-list li strong { color: var(--ink); }
+
+  .answer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 32px 0 8px; }
+  .answer-card {
+    padding: 24px 26px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md);
+    background: var(--paper);
+    box-shadow: var(--shadow-sm);
+  }
+  .answer-card .num { color: var(--accent); font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; }
+  .answer-card h3 { margin: 8px 0 10px; font-family: var(--display); font-size: 19px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+  .answer-card p { color: var(--ink-soft); font-size: 13.5px; line-height: 1.6; }
+  .answer-card p + p { margin-top: 10px; }
+  .answer-card strong { color: var(--ink); }
+
+  .unlocked { margin: 26px 0 8px; padding: 0; list-style: none; }
+  .unlocked li {
+    display: grid;
+    grid-template-columns: 18px 1fr;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid var(--line);
+    color: var(--ink-soft);
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .unlocked li::before { color: var(--green); content: "\2713"; font-size: 12px; }
+  .unlocked li strong { color: var(--ink); }
+
+  @media (max-width: 680px) {
+    .parts-list li { grid-template-columns: 1fr; gap: 4px; }
+    .answer-grid { grid-template-columns: 1fr; }
+  }
+
+  /* --- restructure additions --- */
+  .proof-line {
+    margin: 26px 0 0;
+    padding: 16px 20px;
+    border-left: 3px solid var(--green);
+    background: var(--green-wash);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    font-size: 14.5px;
+    line-height: 1.62;
+    color: var(--ink-soft);
+  }
+  .proof-line b { color: #24503a; font-weight: 600; }
+  .proof-line a { color: #24503a; }
+  .state-row.state-later { border-top-style: dashed; opacity: 0.78; }
+  .state-row.state-later .state-num,
+  .state-row.state-later b { color: var(--ink-faint); }
+  .promise-line {
+    margin: 24px 0 0;
+    font-family: var(--display);
+    font-size: clamp(19px, 2.4vw, 25px);
+    line-height: 1.35;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+  }
+  .promise-line span { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="read-progress" aria-hidden="true"><span id="progress-bar"></span></div>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="#top">Patram&#8209;Ingest</a>
+    <span class="header-meta">BharatGen Vision Team · Aug 2026</span>
+  </div>
+</header>
+
+<main id="top">
+
+<div class="hero">
+  <div>
+    <p class="eyebrow"><span>Data pipelines</span>15 min read</p>
+    <h1>Crash&#8209;safe inference over <span>hundreds of millions</span> of images</h1>
+    <p class="hero-deck">Before our vision&#8209;language model can train, other models have to label its dataset: a few hundred million document images, processed on 256 GPUs over several days. Machines fail throughout a run that long. Patram&#8209;Ingest is the engine we built so that a crash, anywhere in the fleet, costs at most 250 images of rework.</p>
+    <div class="hero-meta">
+      <span><b>BharatGen Vision Team</b></span>
+      <span>Python + PostgreSQL + vLLM</span>
+      <span>runs on a 32&#8209;node GPU fleet</span>
+    </div>
+  </div>
+
+  <div class="hero-card">
+    <p class="card-label">The data model</p>
+    <div class="state-table" role="img" aria-label="The states an image row can hold: pending, processing, done, failed, plus two more added later for multi-stage pipelines">
+      <div class="state-row st0"><span class="state-num">0</span><span><b>PENDING</b><small>waiting to be picked up</small></span></div>
+      <div class="state-row st1"><span class="state-num">1</span><span><b>PROCESSING</b><small>claimed by exactly one worker</small></span></div>
+      <div class="state-row st2"><span class="state-num">2</span><span><b>DONE</b><small>output was on disk first</small></span></div>
+      <div class="state-row st3"><span class="state-num">3</span><span><b>FAILED</b><small>a verdict on the image, never a crash</small></span></div>
+      <div class="state-row state-later"><span class="state-num">+2</span><span><b>TWO MORE</b><small>added later for multi&#8209;stage pipelines (section 08)</small></span></div>
+    </div>
+    <p>One row per image, in PostgreSQL. All of the coordination in the system is this column, plus a query that flips a batch of rows from 0 to 1.</p>
+  </div>
+</div>
+
+<div class="article-layout">
+
+  <aside class="article-rail" aria-label="Contents">
+    <p>Contents</p>
+    <nav>
+      <a href="#problem" data-rail>The job that always crashes</a>
+      <a href="#lifecycle" data-rail>Four states, one table</a>
+      <a href="#machine" data-rail>From a claimed path to a result</a>
+      <a href="#durability" data-rail>Where the 250 comes from</a>
+      <a href="#failures" data-rail>Four outcomes, four actions</a>
+      <a href="#workers" data-rail>Many workers, one queue</a>
+      <a href="#throughput" data-rail>Two things starved the GPU</a>
+      <a href="#dag" data-rail>When one model isn't enough</a>
+      <a href="#usage" data-rail>What you actually write</a>
+      <a href="#production" data-rail>Eight million prompts later</a>
+      <a href="#takeaways" data-rail>Takeaways</a>
+    </nav>
+  </aside>
+
+  <div class="article-body">
+
+    <section id="problem">
+      <p class="section-index">01 &#183; The problem</p>
+      <h2>The job that always crashes</h2>
+      <p>Before a vision&#8209;language model can be trained, somebody has to build its dataset. Ours starts as raw document images, and every useful label on them, the OCR text, the caption, the layout boxes, the quality score, is the output of some other model. Each label is one model call, prompt and image in, JSON out, repeated a few hundred million times. We run that on a cluster of 32 <em>nodes</em>, where a node means one machine with 8 H100 GPUs in it. A single pass over the dataset takes days, and it has to finish before training can start.</p>
+      <p>A job that long on a shared cluster doesn't run cleanly. Nodes get reclaimed by other teams mid&#8209;run. A machine runs out of memory. The database fails over. vLLM, the inference engine under everything, sometimes crashes on its own. During one run, orphaned GPU processes took down a node every ten minutes for six hours.</p>
+      <p>The hard engineering problem is the restart. After a crash you have output files on one side, a record of what finished on the other, and the crash landed somewhere between the two. Trust the record and you drop work that was already written; trust the files and you process an image twice. Either way the dataset comes out wrong, and nobody notices until training.</p>
+      <p>Each project on the team used to hand&#8209;write this resume logic, and each version got it wrong in its own way. Patram&#8209;Ingest replaces those scripts with one engine that makes one guarantee.</p>
+      <p class="promise-line">Kill any process on any machine at any instant, then restart it: at most <span>250 images</span> are re&#8209;processed, none are lost, and none are written twice.</p>
+      <p>The machinery behind that guarantee is small: a PostgreSQL table that tracks every image, one rule about the order in which bytes reach disk, worker processes that talk only through queues, and, for multi&#8209;stage pipelines, two extra state values. The rest of the post goes through those pieces in turn.</p>
+    </section>
+
+    <section id="lifecycle">
+      <p class="section-index">02 &#183; The core idea</p>
+      <h2>Every image is in exactly one of four states</h2>
+      <p>The engine keeps one PostgreSQL table, <code>images</code>, with one row per image and a state column holding one of four values. At any instant, everywhere in the cluster, an image is in exactly one of these states.</p>
+
+      <ul class="parts-list">
+        <li><b>0 &#183; pending</b><span>&#8220;Nobody has picked me up. Please process me.&#8221;</span></li>
+        <li><b>1 &#183; processing</b><span>&#8220;A worker somewhere already owns me. Don't touch me.&#8221;</span></li>
+        <li><b>2 &#183; done</b><span>&#8220;My output is written. Never send me anywhere again.&#8221;</span></li>
+        <li><b>3 &#183; failed</b><span>&#8220;I can't be processed by this pipeline, and retrying won't change that.&#8221;</span></li>
+      </ul>
+
+      <p>Most of the machinery in later sections exists to keep that sentence true while processes are being killed around it. Here is one image going all the way through.</p>
+
+      <figure class="arch-figure">
+        <svg viewBox="0 0 820 178" role="img" aria-label="One row moves from state 0 pending to state 1 processing by a single atomic claim, then to state 2 done after the output has been written and fsynced. A crash anywhere between resets the row to state 0 to be tried again.">
+          <defs>
+            <marker id="lifeArr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3541e"/></marker>
+            <marker id="lifeRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b0402f"/></marker>
+          </defs>
+          <g font-family="IBM Plex Mono, monospace">
+            <rect x="20" y="48" width="180" height="54" rx="10" fill="#fdfaf3" stroke="#d5c6aa" stroke-width="1.4"/>
+            <text x="110" y="72" text-anchor="middle" font-size="13" fill="#2b2419">0 PENDING</text>
+            <text x="110" y="90" text-anchor="middle" font-size="9" fill="#8d7f69">a path in a table</text>
+
+            <rect x="320" y="48" width="180" height="54" rx="10" fill="#faeadb" stroke="#b3541e" stroke-width="1.5"/>
+            <text x="410" y="72" text-anchor="middle" font-size="13" fill="#8a3d12">1 PROCESSING</text>
+            <text x="410" y="90" text-anchor="middle" font-size="9" fill="#6b5e4b">mine, and nobody else's</text>
+
+            <rect x="620" y="48" width="180" height="54" rx="10" fill="#e7f1e9" stroke="#35705a" stroke-width="1.5"/>
+            <text x="710" y="72" text-anchor="middle" font-size="13" fill="#24503a">2 DONE</text>
+            <text x="710" y="90" text-anchor="middle" font-size="9" fill="#6b5e4b">the answer is already on disk</text>
+
+            <line x1="202" y1="75" x2="314" y2="75" stroke="#b3541e" stroke-width="1.4" marker-end="url(#lifeArr)"/>
+            <text x="258" y="40" text-anchor="middle" font-size="9.5" fill="#8a3d12">one atomic claim</text>
+            <text x="258" y="27" text-anchor="middle" font-size="9" fill="#8d7f69">32 machines, same query</text>
+
+            <line x1="502" y1="75" x2="614" y2="75" stroke="#35705a" stroke-width="1.4" marker-end="url(#lifeArr)" stroke-linecap="round"/>
+            <text x="558" y="40" text-anchor="middle" font-size="9.5" fill="#24503a">run, write, fsync</text>
+            <text x="558" y="27" text-anchor="middle" font-size="9" fill="#8d7f69">in that order, always</text>
+
+            <path d="M 410 104 L 410 146 L 110 146 L 110 106" fill="none" stroke="#b0402f" stroke-width="1.4" stroke-dasharray="5 4" marker-end="url(#lifeRed)"/>
+            <text x="260" y="164" text-anchor="middle" font-size="10" fill="#b0402f">crash, kill &#8209;9, node reclaimed &#8594; the row resets and is tried again</text>
+          </g>
+        </svg>
+        <figcaption><strong>A crash can only ever move a row backwards.</strong> It can never leave a row at DONE with nothing behind it, and it can never hand the same image to two machines.</figcaption>
+      </figure>
+
+      <p>When a node needs work, it takes a batch of pending rows and flips them from 0 to 1 in one atomic statement, using <code>FOR UPDATE SKIP LOCKED</code>. If 24 nodes ask at once, each gets a different batch; a row can't be half&#8209;claimed, and two nodes can't both win it.</p>
+      <p>That claim query is also the entire multi&#8209;node coordination. Every machine points at the same table and runs the same program, so a new node starts claiming work and a reclaimed one simply stops. There is no leader, no membership list, and no node&#8209;to&#8209;node channel to repair after a failure.</p>
+      <p>A central database sounds like a bottleneck until you put numbers on it. Fetching 200 rows takes 5&ndash;10&nbsp;ms, while running those images on a GPU takes 20&ndash;30 seconds, and at 100 million rows the database is roughly 20&nbsp;GB. One Postgres instance on local NVMe handles that easily. It is a single point of failure, and we accepted that because it fails in an obvious way.</p>
+
+      <details class="deep-dive">
+        <summary>The distributed options we rejected <small>side note</small></summary>
+        <div>
+          <p>We considered rqlite and LiteFS for replicated SQLite, Redis as a work queue, and a scheme where the first node to boot hosts Postgres for the rest. Each added a membership or failover problem to a cluster whose nodes can be reclaimed during a run.</p>
+          <p>The workload never justified that cost. Each node sends one 5&nbsp;ms query about every 25 seconds of GPU work, so a single unreplicated Postgres instance answers the useful part without becoming part of the bottleneck.</p>
+        </div>
+      </details>
+    </section>
+
+    <section id="machine">
+      <p class="section-index">03 &#183; The machine</p>
+      <h2>From a claimed path to a durable result</h2>
+      <p>Now every node can see the same pending images and claim work without colliding. The next problem starts on the node: turn those claimed paths into output, get that output safely to disk, and only then say the image is DONE.</p>
+      <p>Six components handle that on each node, split across two kinds of process.</p>
+
+      <figure class="arch-figure">
+        <svg viewBox="0 0 820 392" role="img" aria-label="One node. An orchestrator process contains preparation, collector, writer, and recovery components. Preparation sends requests across a request queue to separate worker processes, which are the only processes that use GPUs. Workers send responses back on a response queue. The orchestrator uses a stop event to shut workers down, records work in PostgreSQL, and fsyncs JSONL shards before marking an image done.">
+          <defs>
+            <marker id="aInk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8d7f69"/></marker>
+            <marker id="aAcc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b3541e"/></marker>
+            <marker id="aGrn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#35705a"/></marker>
+          </defs>
+          <g font-family="IBM Plex Mono, monospace">
+            <rect x="8" y="18" width="568" height="360" rx="12" fill="none" stroke="#d5c6aa" stroke-width="1.5"/>
+            <text x="24" y="40" font-size="10" letter-spacing="0.08em" fill="#8d7f69">ONE NODE &#183; 32 IN THE FLEET</text>
+
+            <rect x="28" y="54" width="520" height="140" rx="10" fill="#fdfaf3" stroke="#d5c6aa" stroke-width="1.2"/>
+            <text x="44" y="76" font-size="9.5" letter-spacing="0.07em" fill="#b3541e">ORCHESTRATOR PROCESS &#183; NEVER TOUCHES A GPU</text>
+            <text x="44" y="97" font-size="10" fill="#6b5e4b">recover first, then claim paths and commit only durable output</text>
+
+            <rect x="42" y="112" width="150" height="46" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.1"/>
+            <text x="117" y="132" text-anchor="middle" font-size="11.5" fill="#2b2419">preparation</text>
+            <text x="117" y="148" text-anchor="middle" font-size="9" fill="#8d7f69">paths &#8594; requests</text>
+
+            <rect x="204" y="112" width="150" height="46" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.1"/>
+            <text x="279" y="132" text-anchor="middle" font-size="11.5" fill="#2b2419">writer</text>
+            <text x="279" y="148" text-anchor="middle" font-size="9" fill="#8d7f69">buffer &#8594; fsync &#8594; commit</text>
+
+            <rect x="366" y="112" width="166" height="46" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.1"/>
+            <text x="449" y="132" text-anchor="middle" font-size="11.5" fill="#2b2419">collector</text>
+            <text x="449" y="148" text-anchor="middle" font-size="9" fill="#8d7f69">validate &#8594; retry or finish</text>
+
+            <line x1="117" y1="158" x2="117" y2="224" stroke="#b3541e" stroke-width="1.4" marker-end="url(#aAcc)"/>
+            <rect x="42" y="228" width="430" height="42" rx="10" fill="#faeadb" stroke="#b3541e" stroke-width="1.5"/>
+            <text x="257" y="248" text-anchor="middle" font-size="12.5" fill="#8a3d12">request queue</text>
+            <text x="257" y="263" text-anchor="middle" font-size="9" fill="#6b5e4b">prepared prompt + image paths</text>
+
+            <line x1="109" y1="270" x2="109" y2="314" stroke="#b3541e" stroke-width="1.2" marker-end="url(#aAcc)"/>
+            <line x1="257" y1="270" x2="257" y2="314" stroke="#b3541e" stroke-width="1.2" marker-end="url(#aAcc)"/>
+            <line x1="405" y1="270" x2="405" y2="314" stroke="#b3541e" stroke-width="1.2" marker-end="url(#aAcc)"/>
+
+            <rect x="42" y="316" width="134" height="44" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.2"/>
+            <text x="109" y="336" text-anchor="middle" font-size="11" fill="#2b2419">worker 0</text>
+            <text x="109" y="351" text-anchor="middle" font-size="8.5" fill="#8d7f69">vLLM &#183; GPU 0-1</text>
+
+            <rect x="190" y="316" width="134" height="44" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.2"/>
+            <text x="257" y="336" text-anchor="middle" font-size="11" fill="#2b2419">worker 1</text>
+            <text x="257" y="351" text-anchor="middle" font-size="8.5" fill="#8d7f69">vLLM &#183; GPU 2-3</text>
+
+            <rect x="338" y="316" width="134" height="44" rx="7" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.2" stroke-dasharray="5 4"/>
+            <text x="405" y="336" text-anchor="middle" font-size="11" fill="#2b2419">worker N</text>
+            <text x="405" y="351" text-anchor="middle" font-size="8.5" fill="#8d7f69">or a browser, or any fn</text>
+
+            <path d="M 472 338 L 556 338 L 556 136 L 552 136" fill="none" stroke="#8d7f69" stroke-width="1.3" marker-end="url(#aInk)"/>
+            <text x="566" y="250" font-size="10" fill="#6b5e4b" transform="rotate(-90 566 250)">response queue</text>
+            <path d="M 488 182 L 522 182 L 522 300" fill="none" stroke="#b0402f" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#aInk)"/>
+            <text x="531" y="260" font-size="8.5" fill="#b0402f" transform="rotate(-90 531 260)">stop event</text>
+
+            <rect x="612" y="58" width="196" height="98" rx="12" fill="#faeadb" stroke="#b3541e" stroke-width="1.5"/>
+            <text x="710" y="92" text-anchor="middle" font-size="13" fill="#8a3d12">PostgreSQL</text>
+            <text x="710" y="112" text-anchor="middle" font-size="10" fill="#6b5e4b">the images table</text>
+            <text x="710" y="131" text-anchor="middle" font-size="9" fill="#8d7f69">shared by every node</text>
+
+            <rect x="612" y="206" width="196" height="86" rx="12" fill="#e7f1e9" stroke="#35705a" stroke-width="1.4"/>
+            <text x="710" y="240" text-anchor="middle" font-size="12.5" fill="#24503a">JSONL shards</text>
+            <text x="710" y="260" text-anchor="middle" font-size="9" fill="#6b5e4b">durable before anything</text>
+            <text x="710" y="275" text-anchor="middle" font-size="9" fill="#6b5e4b">records them as done</text>
+
+            <line x1="548" y1="100" x2="608" y2="100" stroke="#b3541e" stroke-width="1.4" marker-end="url(#aAcc)"/>
+            <text x="578" y="92" text-anchor="middle" font-size="8.5" fill="#8a3d12">fetch / mark</text>
+
+            <path d="M 548 176 C 582 176, 584 248, 608 248" fill="none" stroke="#35705a" stroke-width="1.4" marker-end="url(#aGrn)"/>
+            <text x="584" y="200" text-anchor="middle" font-size="8.5" fill="#24503a">fsync</text>
+          </g>
+        </svg>
+        <figcaption><strong>The orchestrator owns the state around the work.</strong> Preparation, collection, writing, and recovery run in its CPU&#8209;only process. Workers run separately. For work and shutdown, the process boundary has three pieces: a request queue, a response queue, and a stop event.</figcaption>
+      </figure>
+
+      <ul class="parts-list">
+        <li><b>recovery</b><span>Runs before work starts. It checks the active shard against PostgreSQL, trims any incomplete tail, and returns replayable work to its fetch state.</span></li>
+        <li><b>preparation</b><span>Builds the prompt, checks that the image can be read, and creates the small request the worker needs.</span></li>
+        <li><b>worker</b><span>Runs vLLM, a browser renderer, or another Python function. <strong>It is the only component that touches a GPU.</strong></span></li>
+        <li><b>collector</b><span>Checks the response against the job's rules: parseable JSON, valid structured output, or a usable rendered result. It sends eligible failures back for retry and returns either validated output or a terminal failure.</span></li>
+        <li><b>writer</b><span>Writes validated results to a JSONL shard, <code>fsync</code>s the file, and makes the result durable.</span></li>
+        <li><b>orchestrator</b><span>Owns the lifecycle and row transitions. A durable result becomes DONE; an image that has exhausted its valid retries becomes FAILED.</span></li>
+      </ul>
+
+      <p>The writer commits in groups of 250: write the output, <code>fsync</code> it, then mark the matching rows DONE. On startup, recovery checks only the last, possibly incomplete group of 250 against the database, trims it, and returns those rows for replay. That check costs the same whether the run has processed ten thousand images or a billion.</p>
+      <p>The process split keeps the hot path simple. Preparation, collection, writing, and recovery share one CPU&#8209;only Python process, where threads can overlap prompt building, validation, and disk I/O. The worker runs in a separate process, so the model's Python bookkeeping doesn't compete with that work for the same interpreter.</p>
+      <p>Every component has one job. Workers never change a database row. The collector decides whether an answer is usable. The writer decides when the JSONL record is durable. The orchestrator moves the row only after those decisions are made. That separation is what lets the pipeline recover without every component carrying its own idea of the run's state.</p>
+      <p>Ctrl+C and SIGTERM take the pipeline through the same shielded teardown: stop accepting work, reset in&#8209;flight rows, close the writer, and stop the workers. The multi&#8209;stage layer in section 08 reuses this exit path unchanged.</p>
+    </section>
+
+    <section id="durability">
+      <p class="section-index">04 &#183; Durability</p>
+      <h2>Where the 250 comes from</h2>
+      <p>The table tracks who owns each image. The remaining question is when a result is safe enough to mark DONE, and the answer is an ordering rule inside the writer.</p>
+      <p>The writer thread buffers results, and every 250 records it runs one fixed sequence: append to the shard file, flush and <code>fsync</code> so the bytes are on the drive rather than in a buffer the kernel might lose, and <em>only then</em> mark those rows DONE in the database.</p>
+
+      <div class="principle">
+        <p><strong>Data becomes durable before anything records that it exists.</strong> With that ordering, a crash at any point can leave work to redo, and can never leave work that was recorded but lost.</p>
+      </div>
+
+      <p>The 250 itself is a config value, and any other number works; lower it and the replay window shrinks further. What sets it for us is where the <code>fsync</code> lands. Our shards live on a shared FSx Lustre mount, where an fsync can stall for 50&ndash;500&nbsp;ms and every call adds load to a filesystem the whole team is using, so we commit in groups of 250 rather than hammering the mount with smaller, more frequent syncs.</p>
+      <p>On restart, recovery truncates the active shard back to the last committed boundary, resets any row still sitting at PROCESSING, and carries on. The panel below walks through each place a crash can land and what it costs.</p>
+
+      <div class="kill-card">
+        <div class="kill-toolbar">
+          <p>Pick where the crash lands</p>
+          <div class="kill-steps" role="group" aria-label="Choose a crash point in the pipeline">
+            <button type="button" data-kill="0" aria-pressed="true"><i aria-hidden="true"></i>locking a batch</button>
+            <button type="button" data-kill="1" aria-pressed="false"><i aria-hidden="true"></i>mid&#8209;inference</button>
+            <button type="button" data-kill="2" aria-pressed="false"><i aria-hidden="true"></i>written, not fsynced</button>
+            <button type="button" data-kill="3" aria-pressed="false"><i aria-hidden="true"></i>fsynced, not marked</button>
+            <button type="button" data-kill="4" aria-pressed="false"><i aria-hidden="true"></i>kill &#8209;9 the whole node</button>
+          </div>
+        </div>
+        <div class="kill-readout">
+          <div class="kill-field"><h4>On disk</h4><p id="kill-disk">Nothing new. No output exists for this batch yet.</p></div>
+          <div class="kill-field"><h4>In the database</h4><p id="kill-db">A few rows caught mid&#8209;flip from PENDING to PROCESSING.</p></div>
+          <div class="kill-field"><h4>What recovery does</h4><p id="kill-recovery">The next startup resets those rows to their fetch state. Attempt counts are untouched.</p></div>
+          <div class="kill-field"><h4>What it costs</h4><p id="kill-cost">Nothing durable. The batch is fetched again, here or on another node.</p></div>
+        </div>
+        <div class="kill-verdict"><b>Replayed</b><p>Every crash window resolves to replay, never to loss and never to a duplicate.</p></div>
+      </div>
+
+      <p>These claims are tested by killing things. <code>kill -9</code> one of four workers mid&#8209;request and the run still finishes with 40 of 40 images DONE, zero FAILED, and clean attempt counts. Kill the model server often enough that the engine gives up, and the run aborts under a named reason with its 12 in&#8209;flight rows handed back and nothing marked FAILED. Both test harnesses run on a laptop with no GPU, because none of this logic knows a GPU exists.</p>
+    </section>
+
+    <section id="failures">
+      <p class="section-index">05 &#183; Failure meanings</p>
+      <h2>Four outcomes, four actions</h2>
+      <p>The write&#8209;fsync&#8209;mark order protects output once it exists. It can't tell us whether an answer is usable, whether an image is bad, or whether the model ever answered at all, and treating those as one failure is how a single dead backend marks millions of rows FAILED. So every request comes back tagged with one of four meanings, and the next action follows from the tag.</p>
+
+      <div class="taxonomy-grid">
+        <div class="taxonomy-card tx-ok"><h3>ok <small>the answer passed</small></h3><p>The model answered and the collector validated it. The writer can commit it, then the row becomes DONE.</p></div>
+        <div class="taxonomy-card tx-fail"><h3>fail <small>the answer is unusable</small></h3><p>The model answered, but the output fails validation, most often because it is not valid JSON. Retry it on a bounded budget; then mark the image FAILED.</p></div>
+        <div class="taxonomy-card tx-reject"><h3>reject <small>the input cannot work</small></h3><p>The image is missing, corrupt, oversized, or deterministically refused. Mark it FAILED now. Another attempt cannot change the input.</p></div>
+        <div class="taxonomy-card tx-infra"><h3>infra <small>nothing answered</small></h3><p>The server died, the worker was killed, or the port vanished. Keep the image replayable and stop the run if the infrastructure stays unhealthy.</p></div>
+      </div>
+
+      <p>The split follows who can know what. The worker holds the backend connection, so it tags a deterministic input rejection or a dead backend. The collector sees the returned text, so it decides whether an <code>ok</code> response is valid or a retryable <code>fail</code>. The orchestrator owns retry budgets and database rows, so it applies the state transition.</p>
+      <p>Before that split, all four outcomes became <code>None</code>. The pipeline retried three times against a dead server, marked the image FAILED, and moved on. A single crashed backend could then march ten million rows into the failure state at full speed, leaving a finished run that looked exactly like the model had rejected every image on its merits.</p>
+      <p><code>infra</code> gets its own path because the image has done nothing wrong. It is retried under a separate budget and never becomes FAILED, and a run with too many consecutive infrastructure failures aborts with its in&#8209;flight images replayable. The same fuse catches a server that is alive but answering everything badly. The invariant all of this maintains: a FAILED row describes the image, never the machinery around it.</p>
+    </section>
+
+    <section id="workers">
+      <p class="section-index">06 &#183; The worker manager</p>
+      <h2>Many workers, one queue</h2>
+      <p>The <code>infra</code> tag only works if something reliably notices that a worker died. Getting that right forced a rewrite of the worker pool, and the rewrite is worth walking through because the bug it fixed is easy to ship.</p>
+      <p>One worker means one model on one GPU, and a node has eight. So the manager runs several, and what a worker <em>is</em> stays open: replicas of one vLLM engine, several Hugging Face models, or plain Python functions. We run pools of 32 headless&#8209;Chrome renderers through the same machinery, because from the manager's side a browser is just a worker whose startup function launches Chrome.</p>
+      <p>The first version fed them the obvious way: one shared request queue that every worker calls <code>get()</code> on. Load balancing comes free, since whoever finishes first takes the next item, and it's the pattern the standard library's documentation shows.</p>
+      <p>The problem appears when a worker is killed. <code>mp.Queue.get()</code> takes the queue's internal reader lock while it polls the pipe, and a process killed inside that window never gives it back. CPython has no recovery for a lock abandoned by a dead process. Every surviving worker then blocks on <code>get()</code> forever.</p>
+      <p>The stall is hard to spot because everything reports healthy. The pool notices the death, recovers the dead worker's in&#8209;flight requests, respawns it, and reports the service fine, while throughput sits at zero with clean logs. We reproduced it in about 20 lines of plain <code>multiprocessing</code> with none of our code involved: with two workers, <strong>3 stalls in 8 kill trials</strong>.</p>
+
+      <div class="pool-compare">
+        <div class="pool-panel">
+          <h3><span class="tag tag-before">before</span>shared queue</h3>
+          <svg viewBox="0 0 300 170" role="img" aria-label="All workers consume one shared queue. A killed worker dies holding the reader lock and every other worker blocks forever.">
+            <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+              <rect x="90" y="12" width="120" height="30" rx="8" fill="#f0eadd" stroke="#8d7f69"/>
+              <text x="150" y="31" text-anchor="middle" fill="#2b2419">request queue</text>
+              <g stroke="#8d7f69" fill="none" stroke-width="1.1">
+                <line x1="120" y1="42" x2="55" y2="102"/>
+                <line x1="150" y1="42" x2="150" y2="102"/>
+                <line x1="180" y1="42" x2="245" y2="102"/>
+              </g>
+              <rect x="20" y="104" width="70" height="28" rx="7" fill="#fffdf8" stroke="#8d7f69"/>
+              <text x="55" y="122" text-anchor="middle" fill="#2b2419">worker 0</text>
+              <rect x="115" y="104" width="70" height="28" rx="7" fill="#f9e7e1" stroke="#b0402f" stroke-width="1.5"/>
+              <text x="150" y="122" text-anchor="middle" fill="#8a3423">killed</text>
+              <rect x="210" y="104" width="70" height="28" rx="7" fill="#fffdf8" stroke="#8d7f69"/>
+              <text x="245" y="122" text-anchor="middle" fill="#2b2419">worker 2</text>
+              <text x="150" y="156" text-anchor="middle" fill="#b0402f">died holding the lock &#8594; all block</text>
+            </g>
+          </svg>
+          <p>Three processes contend for one lock, and nothing releases it when a holder dies.</p>
+        </div>
+        <div class="pool-panel">
+          <h3><span class="tag tag-after">after</span>private inboxes</h3>
+          <svg viewBox="0 0 300 170" role="img" aria-label="A single dispatcher thread inside the manager is the queue's only consumer and forwards each request to a private per-worker inbox.">
+            <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+              <rect x="90" y="8" width="120" height="26" rx="8" fill="#f0eadd" stroke="#8d7f69"/>
+              <text x="150" y="25" text-anchor="middle" fill="#2b2419">request queue</text>
+              <line x1="150" y1="34" x2="150" y2="52" stroke="#b3541e" stroke-width="1.4"/>
+              <rect x="88" y="54" width="124" height="26" rx="8" fill="#faeadb" stroke="#b3541e" stroke-width="1.4"/>
+              <text x="150" y="71" text-anchor="middle" fill="#8a3d12">worker manager</text>
+              <g stroke="#b3541e" fill="none" stroke-width="1.1">
+                <line x1="115" y1="80" x2="55" y2="102"/>
+                <line x1="150" y1="80" x2="150" y2="102"/>
+                <line x1="185" y1="80" x2="245" y2="102"/>
+              </g>
+              <rect x="25" y="104" width="60" height="20" rx="5" fill="#fffdf8" stroke="#d5c6aa"/>
+              <rect x="120" y="104" width="60" height="20" rx="5" fill="#f9e7e1" stroke="#b0402f"/>
+              <rect x="215" y="104" width="60" height="20" rx="5" fill="#fffdf8" stroke="#d5c6aa"/>
+              <text x="55" y="118" text-anchor="middle" fill="#8d7f69">inbox</text>
+              <text x="150" y="118" text-anchor="middle" fill="#8a3423">inbox</text>
+              <text x="245" y="118" text-anchor="middle" fill="#8d7f69">inbox</text>
+              <rect x="25" y="132" width="60" height="24" rx="6" fill="#fffdf8" stroke="#8d7f69"/>
+              <rect x="120" y="132" width="60" height="24" rx="6" fill="#fffdf8" stroke="#8d7f69" stroke-dasharray="4 3"/>
+              <rect x="215" y="132" width="60" height="24" rx="6" fill="#fffdf8" stroke="#8d7f69"/>
+              <text x="55" y="148" text-anchor="middle" fill="#2b2419">worker 0</text>
+              <text x="150" y="148" text-anchor="middle" fill="#8d7f69">respawned</text>
+              <text x="245" y="148" text-anchor="middle" fill="#2b2419">worker 2</text>
+            </g>
+          </svg>
+          <p>One consumer, and a killed worker can only poison the inbox nobody else reads.</p>
+        </div>
+      </div>
+
+      <p>The fix was to stop sharing the queue. A single dispatcher thread inside the worker manager became its only consumer, handing each request to a specific worker through a private inbox belonging to that worker alone. No two processes contend for anything, so no process can strand anything.</p>
+      <p>The single&#8209;consumer design fixed more than the bug. Once one process is the only thing talking to the queue, it knows exactly which requests each worker holds, in ordinary Python, in its own memory, with no shared ledger and no cross&#8209;process bookkeeping. Several things we'd wanted on the worker side turned into local code:</p>
+
+      <ul class="unlocked">
+        <li><span><strong>Liveness by asking the operating system.</strong> The manager owns every process handle, so detecting a hard kill is <code>proc.is_alive()</code> every half second. Around 30 seconds became under one.</span></li>
+        <li><span><strong>No dangling work.</strong> When a worker dies, the manager emits one <code>infra</code> response for every request it owed, so nothing upstream waits on an answer that isn't coming.</span></li>
+        <li><span><strong>A policy per pool.</strong> <code>respawn</code> for cheap independent workers, where one death costs throughput. <code>abort</code> for vLLM, where a death is usually an out&#8209;of&#8209;memory or driver fault that respawning just reproduces while burning GPU&#8209;minutes invisibly.</span></li>
+        <li><span><strong>A cause of death in words.</strong> When a pool aborts, the reason reads like <em>all 8 workers dead; last: rank 1 died before startup finished; respawn budget exhausted</em>, instead of a flag.</span></li>
+        <li><span><strong>Capacity&#8209;aware dispatch.</strong> The manager knows each worker's load, so the next request goes to the least busy one instead of wherever the queue happened to put it.</span></li>
+      </ul>
+
+      <p>It also deleted code. The worker&#8209;side semaphore, the shared in&#8209;flight ledger and the write&#8209;ordering rules around it all existed to manage sharing that no longer happens.</p>
+    </section>
+
+    <section id="throughput">
+      <p class="section-index">07 &#183; Throughput</p>
+      <h2>Two things starved the GPU</h2>
+      <p>With correctness settled, the remaining question is whether the GPUs stay busy. The first implementation was the obvious loop, build a batch of prompts, call vLLM's <code>LLM.generate()</code> on it, validate the results, repeat, and it left the GPU idle for two separate reasons.</p>
+
+      <p><strong>First, the GPU was waiting on prompt preparation.</strong> Before a single image reaches the model you have to read it off disk, decode it, and run the model's own processor over it. There's no reason the GPU should sit through that, so we overlapped it: while the model works on batch N, prepare batch N+1. Threads came first and bought little, since the interpreter runs one at a time, so preparation moved into its own process and the two sides talked over an <code>mp.Queue</code>.</p>
+      <p>That was faster, and it surfaced a new stall. A decoded page can be 10&nbsp;MB or more, and a queue moves a message by pickling it into bytes and copying those bytes through a kernel pipe. At roughly 1.7&nbsp;ms per item per direction, on a full batch, in the gap between two <code>generate()</code> calls, the GPU was now idle waiting for pixels to finish moving between processes. The fix was to stop moving them.</p>
+
+      <details class="deep-dive">
+        <summary>How the shared&#8209;memory handoff works <small>side note</small></summary>
+        <div>
+          <p>A queue's job is to move a message between two processes. <code>put()</code> pickles your object into bytes and writes them into a pipe; the other side reads the bytes back and unpickles. For a small dict that is microseconds of work. For a decoded 12&nbsp;MB page it is a 12&nbsp;MB copy through the kernel on the way in, and another on the way out, for every image in every batch.</p>
+          <p>Shared memory removes the copy by removing the journey. Both processes map <em>the same</em> block of physical RAM at startup, and we carve that block into fixed&#8209;size slots. To send a prompt, the sender claims a free slot, writes the payload into it, and puts the slot number on the queue. To receive, the worker reads that number, reads the payload directly out of its own mapping of the same physical pages, and releases the slot back to the free list.</p>
+          <p>The queue is still there and still doing what queues are good at, carrying a tiny message. What changed is that the small integer travels and the 12&nbsp;MB stays exactly where it was written. The only new bookkeeping is the free list, plus one rule: a slot is released only once the receiver has finished reading it.</p>
+        </div>
+      </details>
+
+      <p><strong>Second, one slow item held up everything batched with it.</strong> <code>generate()</code> takes a batch and returns when the <em>last</em> sequence in it finishes. If one item out of 64 is slow, or the model is hallucinating its way toward the token limit, the other 63 answers are already complete and sitting in memory, unreturned. The batch on the GPU drains toward empty, and nothing new is allowed in until the call comes back.</p>
+
+      <figure class="arch-figure">
+        <svg viewBox="0 0 780 250" role="img" aria-label="Comparison of batched and continuous execution. With one generate call over a batch, five short items finish early but are held until the slowest item completes. With continuous batching each item returns as it finishes and new work joins immediately.">
+          <g font-family="IBM Plex Mono, monospace" font-size="10.5">
+            <text x="0" y="14" fill="#8d7f69">ONE generate() CALL OVER A BATCH</text>
+            <g fill="#cbb894">
+              <rect x="0" y="26" width="150" height="11" rx="3"/>
+              <rect x="0" y="43" width="196" height="11" rx="3"/>
+              <rect x="0" y="60" width="120" height="11" rx="3"/>
+              <rect x="0" y="77" width="238" height="11" rx="3"/>
+              <rect x="0" y="94" width="168" height="11" rx="3"/>
+            </g>
+            <rect x="0" y="111" width="470" height="11" rx="3" fill="#b0402f"/>
+            <g fill="#e7ddc9">
+              <rect x="150" y="26" width="320" height="11" rx="3"/>
+              <rect x="196" y="43" width="274" height="11" rx="3"/>
+              <rect x="120" y="60" width="350" height="11" rx="3"/>
+              <rect x="238" y="77" width="232" height="11" rx="3"/>
+              <rect x="168" y="94" width="302" height="11" rx="3"/>
+            </g>
+            <text x="486" y="66" fill="#b0402f" font-size="10">5 answers finished,</text>
+            <text x="486" y="80" fill="#b0402f" font-size="10">idle until the 6th lands</text>
+            <line x1="470" y1="20" x2="470" y2="128" stroke="#b0402f" stroke-width="1.4" stroke-dasharray="4 3"/>
+            <text x="486" y="120" fill="#8d7f69" font-size="10">all 6 return here</text>
+
+            <text x="0" y="164" fill="#8d7f69">CONTINUOUS BATCHING</text>
+            <g fill="#b3541e">
+              <rect x="0" y="176" width="150" height="11" rx="3"/>
+              <rect x="0" y="193" width="196" height="11" rx="3"/>
+              <rect x="0" y="210" width="120" height="11" rx="3"/>
+            </g>
+            <g fill="#e0a04f">
+              <rect x="156" y="176" width="180" height="11" rx="3"/>
+              <rect x="202" y="193" width="150" height="11" rx="3"/>
+              <rect x="126" y="210" width="140" height="11" rx="3"/>
+            </g>
+            <rect x="0" y="227" width="470" height="11" rx="3" fill="#b3541e"/>
+            <text x="486" y="188" fill="#8a3d12" font-size="10">each answer returns as</text>
+            <text x="486" y="202" fill="#8a3d12" font-size="10">it finishes, new work joins</text>
+            <text x="486" y="234" fill="#8d7f69" font-size="10">the slow one delays only itself</text>
+          </g>
+        </svg>
+        <figcaption><strong>The barrier comes from the shape of the call.</strong> Switching to the engine's async interface, which takes one request at a time and streams each answer back the moment it's ready, removes it, and retries stop being separate shrinking rounds on an almost&#8209;empty GPU and become ordinary work mixed in with the rest.</figcaption>
+      </figure>
+
+      <div class="bar-chart">
+        <p>1024 images, identical hardware and dataset, five configurations benchmarked separately</p>
+        <div class="bar-row bar-old"><span>where we started</span><div class="bar-rail"><i style="width:78%"></i></div><b>1.74 img/s</b></div>
+        <div class="bar-row bar-new"><span>both fixes in</span><div class="bar-rail"><i style="width:100%"></i></div><b>2.24 img/s</b></div>
+        <p>Together the two changes moved throughput <strong>29%</strong> on the same GPUs, 588 seconds down to 457, with zero failures and a fully consistent database in every configuration. On a week&#8209;long run that difference is about two days.</p>
+      </div>
+
+      <details class="deep-dive">
+        <summary>Why we also ship the HTTP backend <small>side note</small></summary>
+        <div>
+          <p>Running a model in&#8209;process is supposed to match running it behind vLLM's own HTTP server with the same engine arguments. It doesn't, and the gap cost us output quality before we found it. Reading vLLM's installed source turned up three mechanisms, each confirmed with a probe script.</p>
+          <p><strong>A silent scheduler downgrade.</strong> The in&#8209;process engine defaults its usage context to a value that isn't a key in vLLM's hardware&#8209;tuned defaults table, so the lookup falls through to <code>max_num_batched_tokens=2048, max_num_seqs=128</code>. On the same H100s the HTTP server picks 8192 and 1024. That is an 8&times; concurrency loss which never appears in your own config.</p>
+          <p><strong>Sampling defaults nobody applies.</strong> A model ships its own <code>generation_config.json</code>, and vLLM merges it in the HTTP layer, never in the engine. Offline callers silently run at <code>top_p=1.0, top_k=0</code> while the server honours the model's 0.95 and 64.</p>
+          <p><strong>Byte&#8209;identical output isn't reachable anyway.</strong> The kernels aren't batch&#8209;invariant, so floating&#8209;point reduction order depends on which requests happen to be batched together. Matching the scheduler and the sampler is the achievable goal; exact equality is not.</p>
+          <p>We fixed all three on the in&#8209;process path, and we also made <code>vllm serve</code> a first&#8209;class backend of its own: the engine can launch a local server and drive it over HTTP, so any engine option works by naming it in the model's YAML with no code change. Choosing between the two is one config value, and both now run identical prompt templating using vLLM's own renderer rather than two implementations that agree by luck.</p>
+        </div>
+      </details>
+    </section>
+
+    <section id="dag">
+      <p class="section-index">08 &#183; Multi-stage pipelines</p>
+      <h2>When one model isn't enough</h2>
+      <p>Everything so far is one prompt through one model. Real datasets usually need more: our document pipeline runs six stages over three models, read the page layout, generate structured HTML from it, fill in placeholder images, render the result in a headless browser, translate it, verify it. Supporting that brings a set of requirements.</p>
+
+      <ul class="demand-list">
+        <li>The shape is a <strong>directed acyclic graph</strong>, not a chain. Stages fan out and merge.</li>
+        <li>A merge stage might need <strong>all five</strong> of its upstream stages to have finished an item before it can touch it. Another might need <strong>any one of three</strong>.</li>
+        <li>Some paths are <strong>decided at runtime</strong>. A tagging stage looks at what it found and sends this image for captioning, that one for entity extraction, and a third nowhere at all. A downstream stage cannot know in advance whether an item is even coming, so it cannot simply wait.</li>
+        <li>Nothing may starve. While stage three works on image <em>n</em>, stages one and two must already be on <em>n+1</em> and <em>n+2</em>. <strong>Every stage runs all the time</strong>, or you have paid for eight GPUs to watch one of them work.</li>
+        <li>The models don't all fit on one machine, so this has to hold <strong>across nodes</strong> while behaving like a single machine.</li>
+      </ul>
+
+      <p>The usual answer to that list is a workflow engine, with a scheduler, a task graph, leases, and a control plane. Patram&#8209;Ingest covers it with two additions to what the previous sections already built.</p>
+
+      <div class="answer-grid">
+        <div class="answer-card">
+          <p class="num">Answer one</p>
+          <h3>Two more states in a table we already had</h3>
+          <p>We added <strong>4 UPSTREAM_READY</strong> and <strong>5 UPSTREAM_FAILED</strong> to the state machine.</p>
+          <p>A downstream stage is now an ordinary stage that fetches rows at state 4 instead of state 0. That single number is the only difference between a root stage and a middle one.</p>
+        </div>
+        <div class="answer-card">
+          <p class="num">Answer two</p>
+          <h3>A router with its own small database</h3>
+          <p>One table, one row per <em>in&#8209;flight</em> item, and two integers on it. Bit <em>i</em> of <code>done_mask</code> is set when stage <em>i</em> has finished that item; bit <em>i</em> of the second mask is set when stage <em>i</em> has been told about it.</p>
+          <p>Every stage declares its upstreams and whether it needs <em>all</em> or <em>any</em> of them, which compiles to a required bit pattern.</p>
+        </div>
+      </div>
+
+      <p>The two extra states are what buy pipeline parallelism. Every stage runs continuously, fetching whatever is ready in its own table and sleeping a second when nothing is, so stage three works on image <em>n</em> while stage one is already on <em>n+2</em>. That overlap falls out of each stage independently asking its own table for work; no code schedules it. The router decides when a row becomes ready.</p>
+
+      <figure class="arch-figure">
+        <svg viewBox="0 0 820 400" role="img" aria-label="A five stage graph where verify waits for all of html and tags, and translate is reached only when the tagging stage routes an item to it. Below, a router table holds one row per in-flight item with a five bit done mask, and the sweep concludes from each mask whether a downstream stage can start.">
+          <defs>
+            <marker id="dagInk" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8d7f69"/></marker>
+            <marker id="dagCld" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#5c7b99"/></marker>
+          </defs>
+          <g font-family="IBM Plex Mono, monospace">
+            <rect x="20" y="72" width="128" height="46" rx="9" fill="#faeadb" stroke="#b3541e" stroke-width="1.5"/>
+            <text x="84" y="94" text-anchor="middle" font-size="12" fill="#8a3d12">layout</text>
+            <text x="84" y="109" text-anchor="middle" font-size="8.5" fill="#6b5e4b">bit 0 &#183; entry</text>
+
+            <rect x="232" y="20" width="128" height="46" rx="9" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.2"/>
+            <text x="296" y="42" text-anchor="middle" font-size="12" fill="#2b2419">html</text>
+            <text x="296" y="57" text-anchor="middle" font-size="8.5" fill="#8d7f69">bit 1</text>
+
+            <rect x="232" y="124" width="128" height="46" rx="9" fill="#fffdf8" stroke="#8d7f69" stroke-width="1.2"/>
+            <text x="296" y="146" text-anchor="middle" font-size="12" fill="#2b2419">tags</text>
+            <text x="296" y="161" text-anchor="middle" font-size="8.5" fill="#8d7f69">bit 2</text>
+
+            <rect x="446" y="72" width="128" height="46" rx="9" fill="#e7f1e9" stroke="#35705a" stroke-width="1.3"/>
+            <text x="510" y="94" text-anchor="middle" font-size="12" fill="#24503a">verify</text>
+            <text x="510" y="109" text-anchor="middle" font-size="8.5" fill="#6b5e4b">bit 3</text>
+
+            <rect x="446" y="188" width="128" height="46" rx="9" fill="#e9eef4" stroke="#5c7b99" stroke-width="1.3" stroke-dasharray="5 4"/>
+            <text x="510" y="210" text-anchor="middle" font-size="12" fill="#2b2419">translate</text>
+            <text x="510" y="225" text-anchor="middle" font-size="8.5" fill="#5c7b99">bit 4</text>
+
+            <path d="M148 85 C 190 85, 195 43, 232 43" fill="none" stroke="#8d7f69" stroke-width="1.3" marker-end="url(#dagInk)"/>
+            <path d="M148 105 C 190 105, 195 147, 232 147" fill="none" stroke="#8d7f69" stroke-width="1.3" marker-end="url(#dagInk)"/>
+            <path d="M360 43 C 404 43, 408 85, 446 85" fill="none" stroke="#8d7f69" stroke-width="1.3" marker-end="url(#dagInk)"/>
+            <path d="M360 147 C 404 147, 408 105, 446 105" fill="none" stroke="#8d7f69" stroke-width="1.3" marker-end="url(#dagInk)"/>
+            <path d="M360 160 C 410 160, 410 211, 446 211" fill="none" stroke="#5c7b99" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#dagCld)"/>
+
+            <text x="600" y="90" font-size="9.5" fill="#24503a">waits for ALL of</text>
+            <text x="600" y="104" font-size="9.5" fill="#24503a">html + tags</text>
+            <text x="600" y="206" font-size="9.5" fill="#5c7b99">reached only when the</text>
+            <text x="600" y="220" font-size="9.5" fill="#5c7b99">tagger routes it here</text>
+
+            <line x1="20" y1="266" x2="800" y2="266" stroke="#d5c6aa" stroke-width="1"/>
+            <text x="20" y="258" font-size="9.5" letter-spacing="0.08em" fill="#8d7f69">ROUTER TABLE &#183; ONE ROW PER IN-FLIGHT ITEM</text>
+            <text x="20" y="286" font-size="9.5" fill="#8d7f69">item_key</text>
+            <text x="180" y="286" font-size="9.5" fill="#8d7f69">done_mask</text>
+            <text x="330" y="286" font-size="9.5" fill="#8d7f69">what the sweep concludes</text>
+
+            <g font-size="11" fill="#2b2419">
+              <text x="20" y="315">page_0001</text>
+              <rect x="180" y="304" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="200" y="304" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="220" y="304" width="15" height="15" rx="3" fill="#efe8da"/>
+              <rect x="240" y="304" width="15" height="15" rx="3" fill="#efe8da"/>
+              <rect x="260" y="304" width="15" height="15" rx="3" fill="#efe8da"/>
+              <text x="330" y="316" font-size="10" fill="#6b5e4b">tags not done &#8594; verify keeps waiting</text>
+
+              <text x="20" y="345">page_0002</text>
+              <rect x="180" y="334" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="200" y="334" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="220" y="334" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="240" y="334" width="15" height="15" rx="3" fill="#efe8da"/>
+              <rect x="260" y="334" width="15" height="15" rx="3" fill="#efe8da"/>
+              <text x="330" y="346" font-size="10" fill="#8a3d12">required pattern met &#8594; activate verify</text>
+
+              <text x="20" y="375" fill="#8d7f69">page_0003</text>
+              <rect x="180" y="364" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="200" y="364" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="220" y="364" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="240" y="364" width="15" height="15" rx="3" fill="#35705a"/>
+              <rect x="260" y="364" width="15" height="15" rx="3" fill="#35705a"/>
+              <text x="330" y="376" font-size="10" fill="#8d7f69">every terminal bit set &#8594; row deleted</text>
+            </g>
+          </g>
+        </svg>
+        <figcaption><strong>Fan&#8209;out, fan&#8209;in, all&#8209;or&#8209;any, conditional routing and multiple entry points are the same test on the same integer.</strong> No code in the framework branches on the shape of a pipeline.</figcaption>
+      </figure>
+
+      <p>Activation runs at two speeds. A stage that finishes a batch registers those items and, if it has a routing function, writes the chosen rows straight to state 4 in the target stages' tables and sets its own bit, so runtime decisions take effect immediately. Ordinary graph edges use the other speed: a sweep reads the masks every few seconds, compares each stage's required pattern, and activates whatever became ready. Once an item's mask covers every terminal stage, its row is deleted, so the router table is sized by <strong>what's in flight, not by the dataset</strong>. A hundred&#8209;million&#8209;image run keeps a few thousand rows in it.</p>
+      <p>Crash safety is the same rule as the writer, one level up. Write the downstream rows first, then set the bit that records you did. Die in between and the bit is still clear, so the next sweep repeats the write, which changes nothing because the update is guarded on the row still being at state 0. Reverse the order and a crash leaves the router believing a stage was activated when it never was, and that item is never processed by anybody, silently, for the rest of the run.</p>
+
+      <div class="principle">
+        <p><strong>A stage doesn't know it's in a DAG.</strong> It fetches rows at a state number and writes results, exactly as it would standing alone. <strong>The router doesn't know what an image or a model is.</strong> It sets bits and compares them to patterns. Neither imports the other's types, and the hard problem lives in the gap between them, where it is about ten lines of bit arithmetic.</p>
+      </div>
+
+      <details class="deep-dive">
+        <summary>Two smaller things that separate this from a demo <small>side note</small></summary>
+        <div>
+          <p><strong>Shared models.</strong> Stages that use the same model can name the same initialization source and share one loaded copy, so the verify stage reuses the HTML generator's already&#8209;running server instead of claiming two more GPUs that don't exist.</p>
+          <p><strong>Lineage in the data.</strong> Every output record carries the ordered list of stages it went through. When items take different paths, that history lives in the dataset rather than in someone's head.</p>
+        </div>
+      </details>
+
+      <details class="deep-dive">
+        <summary>How a stage reads output written on a different machine <small>side note</small></summary>
+        <div>
+          <p>Stages don't all run on the same node, so stage two often needs output that stage one wrote to another machine's local drive. Instead of a service that tracks what lives where, the address goes in the database row itself: which shard file, the byte offset inside it, the length, and which node wrote it. One function turns that into bytes, doing a ranged read from object storage if the shard has been uploaded and a direct read at that offset if it is still local.</p>
+          <p>Uploading a shard so everyone can reach it is four steps in a fixed order: copy it up, record the new location, repoint the rows that name it, and delete the local copy <em>last</em>. While the local file still exists the work counts as unfinished, so a crash anywhere in the middle just means the next sweep does it again.</p>
+          <p>The repointing step only matches rows still naming the path this node wrote, and that turns out to be the entire safety argument for a machine coming back from the dead. If a node is presumed lost and its unfinished work is handed to others, those rows now name different paths, so when the original wakes up and finishes its upload sweep it repoints nothing and overwrites nothing. There is no lease to expire and no heartbeat to miss.</p>
+        </div>
+      </details>
+    </section>
+
+    <section id="usage">
+      <p class="section-index">09 &#183; The user's share</p>
+      <h2>What you actually write</h2>
+      <p>Everything above is engine code that a new pipeline inherits. Someone standing one up writes a config block of about 40 lines, the database address, paths, batch size, model name, GPU list and prompt, plus a small class with four optional hooks. Our reference implementation of that class is 154 lines, most of them docstrings explaining the hooks. The six&#8209;stage branching pipeline from the previous section is 113 lines of stage declarations.</p>
+
+      <div class="code-block">
+        <div class="code-header"><span>the whole project&#8209;specific surface</span><button type="button" data-copy>Copy</button></div>
+        <pre><code><span class="k">class</span> MyTask(PromptAndValidation):
+    <span class="c"># four hooks, all optional; the defaults work out of the box</span>
+    <span class="k">def</span> get_prompt(self, path): ...        <span class="c"># build the prompt for one image</span>
+    <span class="k">def</span> validate(self, response): ...      <span class="c"># ok / fail / reject</span>
+
+<span class="c"># locking, retries, recovery, sharding, multi-node</span>
+<span class="c"># coordination and DAG activation are the engine's problem.</span></code></pre>
+      </div>
+
+      <p>Eight engineers on the team run it today, six of them from their own branches carrying seven different model workloads, and several have vendored it inside their own named projects. The person holding the prompt no longer has to be the person who understands crash recovery.</p>
+    </section>
+
+    <section id="production">
+      <p class="section-index">10 &#183; Production</p>
+      <h2>Eight million prompts later</h2>
+      <p>The largest deployment so far ran 8.47 million prompts through a 27&#8209;billion&#8209;parameter model, unattended, on a cluster shared with other teams. A supervisor borrowed any node whose GPUs were idle and gave it back the moment its owner appeared. Handing a node back is cheap by construction: the worker gets a signal, its teardown returns the rows it held, and they replay elsewhere with nothing marked FAILED. That willingness to yield is what grew the run from 5 nodes to 24.</p>
+
+      <div class="stat-strip">
+        <div class="stat-cell"><b>8.47M</b><span>prompts in one unattended fleet run, up to 24 nodes and 192 GPUs</span></div>
+        <div class="stat-cell"><b>136</b><span>database backends killed mid&#8209;run in the failover chaos test; 52 reconnects, finished exactly</span></div>
+        <div class="stat-cell"><b>12 s</b><span>from writing one row in Postgres to a node stopping gracefully, 16 images in flight, none stranded</span></div>
+      </div>
+
+      <p>Every incident from that run is written down with its cause. Orphaned model processes, each pinning about 76&nbsp;GB of GPU memory and ignoring polite termination, bled nine nodes dry over six hours before we learned to hunt them. The supervisor also taught us that the test for "safe to move onto this node" and the test for "must move off it" are two different tests; the first version used one predicate for both and evicted four healthy workers.</p>
+      <p>Hardening since then is validated the same way, by hostile testing: the 136 kills in the panel above came from a thread killing a Postgres backend every 1.2 seconds under a live 4,000&#8209;item run, which finished 3,999 done, 1 failed, zero duplicates, zero rows stranded. The database also became the control channel, since the connection string is the one thing every operator, dashboard and node already shares. Write a row into a control table and the node it names stops through the same graceful path as Ctrl+C, a path we'd already spent a year testing.</p>
+
+      <div class="fit-grid">
+        <div class="fit-card fit-card-positive">
+          <h3>Where it earns its keep</h3>
+          <ul>
+            <li>Days&#8209;long GPU inference over 100M+ items, where crashes are certain and a bounded replay is the difference between an incident and a log line.</li>
+            <li>Teams where the person with the prompt shouldn't need to own Postgres, retries or GPU scheduling.</li>
+            <li>Mixed workloads: vision models, text models, browsers and detectors on the same rails with the same guarantees.</li>
+            <li>Shared clusters, because yielding a node costs the owner nothing and the run nothing but time.</li>
+          </ul>
+        </div>
+        <div class="fit-card">
+          <h3>Sharp edges we chose</h3>
+          <ul>
+            <li>No automated test suite. Correctness is validated by kill&#8209;harnesses and real runs, and that trade is written down where every user will read it.</li>
+            <li>A hard kill on a worker strands a bounded number of rows at PROCESSING until that worker's next startup resets them.</li>
+            <li>One Postgres is a single point of failure, accepted in exchange for an obvious failure mode.</li>
+            <li>The response queues keep a small window of the same lock bug the request queue was cured of.</li>
+            <li>A routing target that only ever receives some items leaves the rest parked in its table, which is documented rather than fixed.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="takeaways">
+      <p class="section-index">11 &#183; Takeaways</p>
+      <h2>If you're building something like this</h2>
+      <ul class="takeaway-list">
+        <li><div><strong>Give every decision exactly one owner, and pick the component in a position to know.</strong><p>The worker holds the socket, so it names the failure. The orchestrator holds the rows, so it spends the retries. The manager holds the process handles, so it decides who is alive. Most of the complexity in this system dropped away once each question had one owner.</p></div></li>
+        <li><div><strong>Make data durable before anything records that it exists.</strong><p>Write, fsync, then acknowledge. The ordering means a crash can only ever create work to redo, and a fixed boundary means recovery costs the same after any disaster. The same rule applied to cross&#8209;stage handoff is what makes branching pipelines restartable.</p></div></li>
+        <li><div><strong>Never let one return value carry two meanings.</strong><p>"The server is gone" and "the model said no" both arrived as <code>None</code>, and that single ambiguity was enough to turn one outage into ten million false failures.</p></div></li>
+        <li><div><strong>Look for the representation that makes the hard case stop being special.</strong><p>Two extra states turned every downstream stage into an ordinary stage with a different fetch number. Two integers turned every graph topology into the same bit test. Neither is clever; both replaced a scheduler we would otherwise have had to write and maintain.</p></div></li>
+      </ul>
+    </section>
+
+    <footer class="article-footer">
+      <p><strong>Patram&#8209;Ingest</strong> is built and run by the <strong>BharatGen Vision Team</strong> as the data&#8209;generation engine behind the Patram family of vision&#8209;language models.</p>
+      <a href="#top" style="flex:0 0 auto; color:var(--accent); font-weight:500; font-size:13px; text-decoration:none;">Back to top &uarr;</a>
+    </footer>
+
+  </div>
+</div>
+</main>
+
+<script>
+  (function () {
+    "use strict";
+
+    var bar = document.getElementById("progress-bar");
+    function onScroll() {
+      var h = document.documentElement;
+      var max = h.scrollHeight - h.clientHeight;
+      bar.style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + "%";
+    }
+    document.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+
+    var links = Array.prototype.slice.call(document.querySelectorAll("[data-rail]"));
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute("href").slice(1)] = a; });
+    if ("IntersectionObserver" in window) {
+      var current = null;
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) {
+            if (current) current.removeAttribute("aria-current");
+            current = byId[e.target.id];
+            if (current) current.setAttribute("aria-current", "true");
+          }
+        });
+      }, { rootMargin: "-25% 0px -65% 0px" });
+      links.forEach(function (a) {
+        var sec = document.getElementById(a.getAttribute("href").slice(1));
+        if (sec) io.observe(sec);
+      });
+    }
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-copy]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var pre = btn.closest(".code-block").querySelector("pre");
+        var text = pre ? pre.textContent : "";
+        function done() {
+          var old = btn.textContent;
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = old; }, 1400);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, done);
+        }
+      });
+    });
+
+    var KILL = [
+      {
+        disk: "Nothing new. No output exists for this batch yet.",
+        db: "A few rows caught mid‑flip from PENDING to PROCESSING.",
+        recovery: "The next startup resets those rows to their fetch state. Attempt counts are untouched.",
+        cost: "Nothing durable. The batch is fetched again, here or on another node."
+      },
+      {
+        disk: "Still nothing for the in‑flight items; results exist only in worker memory.",
+        db: "A bounded number of rows locked at PROCESSING by this worker.",
+        recovery: "Rows reset to their fetch state and get fetched again. Nothing is marked FAILED, because a crash is never the image's fault.",
+        cost: "The GPU minutes those in‑flight items had consumed. Replayed, not lost."
+      },
+      {
+        disk: "A tail of records the operating system may or may not have flushed to the drive.",
+        db: "Those rows are still at PROCESSING, because the database is only told after the fsync returns.",
+        recovery: "Recovery truncates the shard back to the last committed 250‑record boundary and resets the rows.",
+        cost: "At most 250 records re‑processed. This window is where the 250‑image bound comes from."
+      },
+      {
+        disk: "Durable, fsynced records. The data is safe.",
+        db: "Doesn't know yet; the crash landed between the fsync and the database write.",
+        recovery: "Lines whose rows aren't DONE are truncated and those rows replay, so the file and the table agree again and nothing appears twice.",
+        cost: "At most 250 records re‑processed, even though their first copies had already reached the drive."
+      },
+      {
+        disk: "Every committed group of 250 is safe; each worker's uncommitted tail behaves like the windows above.",
+        db: "This node's locked rows sit at PROCESSING, bounded per worker.",
+        recovery: "Each worker's next startup resets its own rows. A node that is dead for good is handed back with one command, which selects by what it can still reach rather than by who owns what.",
+        cost: "Still bounded per worker, still zero rows marked FAILED. The rest of the fleet never noticed."
+      }
+    ];
+    var killButtons = Array.prototype.slice.call(document.querySelectorAll("[data-kill]"));
+    var fDisk = document.getElementById("kill-disk");
+    var fDb = document.getElementById("kill-db");
+    var fRec = document.getElementById("kill-recovery");
+    var fCost = document.getElementById("kill-cost");
+    killButtons.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        killButtons.forEach(function (b) { b.setAttribute("aria-pressed", "false"); });
+        btn.setAttribute("aria-pressed", "true");
+        var k = KILL[parseInt(btn.getAttribute("data-kill"), 10)];
+        fDisk.textContent = k.disk;
+        fDb.textContent = k.db;
+        fRec.textContent = k.recovery;
+        fCost.textContent = k.cost;
+      });
+    });
+  })();
+</script>
+
+</body>
+</html>
